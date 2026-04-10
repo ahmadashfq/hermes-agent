@@ -59,6 +59,23 @@ FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
 
 
+def format_completion_output(output: str, *, for_agent: bool = False) -> str:
+    """Normalize completion output so empty stdout doesn't look like a missing result."""
+    text = (output or "").strip()
+    if text:
+        return text
+    if for_agent:
+        return (
+            "(No buffered stdout captured. Do not assume the job produced no result — "
+            "inspect process(action=\"log\", session_id=...) and any known output files "
+            "or artifact paths before replying.)"
+        )
+    return (
+        "(No buffered stdout captured. The process may have written results to files "
+        "or logs instead of stdout.)"
+    )
+
+
 @dataclass
 class ProcessSession:
     """A tracked background process with output buffering."""
@@ -500,12 +517,12 @@ class ProcessRegistry:
         # _move_to_finished(), producing duplicate [SYSTEM: ...] messages.
         if was_running and session.notify_on_complete:
             from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            raw_output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
             self.completion_queue.put({
                 "session_id": session.id,
                 "command": session.command,
                 "exit_code": session.exit_code,
-                "output": output_tail,
+                "output": format_completion_output(raw_output_tail, for_agent=True),
             })
 
     # ----- Query Methods -----

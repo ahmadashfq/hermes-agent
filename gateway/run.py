@@ -6221,7 +6221,9 @@ class GatewayRunner:
                 # --- Agent-triggered completion: inject synthetic message ---
                 if agent_notify:
                     from tools.ansi_strip import strip_ansi
-                    _out = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+                    from tools.process_registry import format_completion_output
+                    _raw_out = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+                    _out = format_completion_output(_raw_out, for_agent=True)
                     synth_text = (
                         f"[SYSTEM: Background process {session_id} completed "
                         f"(exit code {session.exit_code}).\n"
@@ -6266,7 +6268,9 @@ class GatewayRunner:
                     or (notify_mode == "error" and session.exit_code not in (0, None))
                 )
                 if should_notify:
-                    new_output = session.output_buffer[-1000:] if session.output_buffer else ""
+                    from tools.process_registry import format_completion_output
+                    _raw_output = session.output_buffer[-1000:] if session.output_buffer else ""
+                    new_output = format_completion_output(_raw_output, for_agent=False)
                     message_text = (
                         f"[Background process {session_id} finished with exit code {session.exit_code}~ "
                         f"Here's the final output:\n{new_output}]"

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 from tools.process_registry import (
     ProcessRegistry,
     ProcessSession,
+    format_completion_output,
 )
 
 
@@ -72,6 +73,16 @@ class TestCompletionQueue:
     def test_queue_exists(self, registry):
         assert hasattr(registry, "completion_queue")
         assert registry.completion_queue.empty()
+
+    def test_format_completion_output_empty_for_agent(self):
+        text = format_completion_output("", for_agent=True)
+        assert "No buffered stdout captured" in text
+        assert "process(action=\"log\"" in text
+
+    def test_format_completion_output_empty_for_user(self):
+        text = format_completion_output("", for_agent=False)
+        assert "No buffered stdout captured" in text
+        assert "results to files or logs" in text
 
     def test_move_to_finished_no_notify(self, registry):
         """Processes without notify_on_complete don't enqueue."""
@@ -139,6 +150,23 @@ class TestCompletionQueue:
         assert registry.completion_queue.qsize() == 1
         completion = registry.completion_queue.get_nowait()
         assert completion["exit_code"] == -15  # from the first (kill) call
+
+    def test_move_to_finished_empty_output_gets_hint(self, registry):
+        s = _make_session(
+            notify_on_complete=True,
+            output="",
+            exit_code=0,
+        )
+        s.exited = True
+        s.exit_code = 0
+        registry._running[s.id] = s
+        with patch.object(registry, "_write_checkpoint"):
+            registry._move_to_finished(s)
+
+        completion = registry.completion_queue.get_nowait()
+        assert completion["exit_code"] == 0
+        assert "No buffered stdout captured" in completion["output"]
+        assert "process(action=\"log\"" in completion["output"]
 
     def test_output_truncated_to_2000(self, registry):
         """Long output is truncated to last 2000 chars."""
