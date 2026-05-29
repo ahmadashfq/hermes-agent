@@ -191,6 +191,33 @@ def test_board_query_param_default_overrides_current_board_pointer(client):
     assert pinned_ids == {default_task["id"]}
 
 
+def _write_corrupt_db(path: Path) -> bytes:
+    """Write bytes that pass the SQLite header sniff but fail actual open."""
+
+    header = b"SQLite format 3\x00" + b"\x10\x00\x02\x02\x00\x40\x20\x20"
+    header += b"\x00\x00\x00\x0c\x00\x00\x23\x46\x00\x00\x00\x00"
+    header = header.ljust(100, b"\x00")
+    payload = b"definitely not a valid sqlite page \x00\x01\x02\x03" * 64
+    blob = header + payload
+    path.write_bytes(blob)
+    return blob
+
+
+def test_board_returns_409_for_corrupt_board_db(client):
+    kb.create_board("corrupt")
+    db_path = kb.kanban_db_path("corrupt")
+    _write_corrupt_db(db_path)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    response = client.get("/api/plugins/kanban/board?board=corrupt")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "kanban_db_corrupt"
+    assert "Refusing to open corrupt kanban board database" in detail["message"]
+    assert str(db_path) not in detail["message"]
+
+
 def test_dashboard_select_filters_use_sdk_value_change_handler():
     """Tenant/assignee filters must work with the dashboard SDK Select API.
 
@@ -245,6 +272,26 @@ def test_dashboard_initial_board_uses_backend_current_when_unpinned():
     assert "if (!storedBoard && !board && data && data.current)" in js
     assert "setBoard(data.current);" in js
     assert 'readSelectedBoard() || "default"' not in js
+
+
+def test_dashboard_initial_board_error_uses_parsed_message_and_keeps_switcher():
+    """Corrupt-board failures should stay recoverable from the UI.
+
+    Regression: the initial error state used raw HTTP/JSON plumbing and returned
+    before the board switcher rendered, trapping the user on the broken board.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text()
+
+    assert "function parseApiErrorDetail(err)" in js
+    assert "setError(String(detail.message || \"\"));" in js
+    assert 'setErrorCode(detail.code || null);' in js
+    assert 'const isCorruptBoardError = errorCode === "kanban_db_corrupt";' in js
+    assert 'tx(t, "loadFailedCorruptHint"' in js
+    assert 'if (error && !boardData) {' in js
+    assert 'h(BoardSwitcher, {' in js
 
 
 # ---------------------------------------------------------------------------

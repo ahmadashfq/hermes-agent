@@ -543,6 +543,8 @@ export const en: Translations = {
     loadFailed: "Failed to load Kanban board: ",
     loadFailedHint:
       "The backend auto-creates kanban.db on first read. If this persists, check the dashboard logs.",
+    loadFailedCorruptHint:
+      "This board's database looks corrupt. Switch to another board, or restore the preserved backup path shown above.",
     board: "Board",
     newBoard: "+ New board",
     newBoardTitle: "New board",
