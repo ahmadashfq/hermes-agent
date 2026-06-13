@@ -4740,6 +4740,50 @@ def _git_common_dir(path: Path) -> Optional[Path]:
     return Path(out).expanduser().resolve(strict=False)
 
 
+def _git_dir(path: Path) -> Optional[Path]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    out = (result.stdout or "").strip()
+    if not out:
+        return None
+    return Path(out).expanduser().resolve(strict=False)
+
+
+def _git_current_branch(path: Path) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    branch = (result.stdout or "").strip()
+    return branch or None
+
+
+def _is_linked_worktree_checkout(path: Path) -> bool:
+    git_dir = _git_dir(path)
+    common_dir = _git_common_dir(path)
+    if git_dir is None or common_dir is None:
+        return False
+    return git_dir != common_dir
+
+
 def _nearest_existing_path(path: Path) -> Path:
     current = path
     while not current.exists() and current != current.parent:
@@ -4809,6 +4853,10 @@ def _resolve_worktree_workspace(task: Task) -> tuple[Path, str]:
             f"{task.workspace_path!r}; use an absolute path"
         )
     requested_resolved = requested.resolve(strict=False)
+
+    if requested.exists() and _is_linked_worktree_checkout(requested):
+        actual_branch = _git_current_branch(requested)
+        return requested_resolved, actual_branch or branch_name
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and requested_resolved == repo_root:
@@ -6429,7 +6477,11 @@ def dispatch_once(
         if claimed is None:
             continue
         try:
-            workspace = resolve_workspace(claimed, board=board)
+            resolved_branch_name = None
+            if claimed.workspace_kind == "worktree":
+                workspace, resolved_branch_name = _resolve_worktree_workspace(claimed)
+            else:
+                workspace = resolve_workspace(claimed, board=board)
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
@@ -6441,7 +6493,7 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
-            set_branch_name(conn, claimed.id, (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
+            set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
@@ -6517,7 +6569,11 @@ def dispatch_once(
         if claimed is None:
             continue
         try:
-            workspace = resolve_workspace(claimed, board=board)
+            resolved_branch_name = None
+            if claimed.workspace_kind == "worktree":
+                workspace, resolved_branch_name = _resolve_worktree_workspace(claimed)
+            else:
+                workspace = resolve_workspace(claimed, board=board)
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
@@ -6529,7 +6585,7 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
-            set_branch_name(conn, claimed.id, (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
+            set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         # Force-load sdlc-review skill for review agents.  The
         # _default_spawn function already auto-loads kanban-worker, and

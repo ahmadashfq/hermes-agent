@@ -2048,6 +2048,66 @@ def test_dispatch_worktree_task_persists_materialized_workspace_and_branch(kanba
     assert f"branch refs/heads/wt/{tid}" in listed
 
 
+def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch(kanban_home, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    kb.create_board("worktree-rerun-board", default_workdir=str(repo))
+    import hermes_cli.profiles as profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda _name: True)
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect(board="worktree-rerun-board") as conn:
+        tid = kb.create_task(
+            conn,
+            title="ship",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            board="worktree-rerun-board",
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="worktree-rerun-board")
+        first_task = kb.get_task(conn, tid)
+        assert first_task is not None
+        expected = repo / ".worktrees" / tid
+        assert first_task.workspace_path == str(expected)
+        assert first_task.branch_name == f"wt/{tid}"
+
+        conn.execute(
+            "UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="worktree-rerun-board")
+        second_task = kb.get_task(conn, tid)
+
+    assert first.spawned == [(tid, "sentinel", str(expected))]
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert spawns == [(tid, str(expected)), (tid, str(expected))]
+    assert second_task is not None
+    assert second_task.workspace_path == str(expected)
+    actual_branch = subprocess.run(
+        ["git", "-C", str(expected), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert actual_branch == f"wt/{tid}"
+    assert second_task.branch_name == actual_branch
+    listed = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert listed.count(f"worktree {expected}\n") == 1
+    assert f"worktree {expected}/.worktrees/{tid}" not in listed
+    assert f"branch refs/heads/{actual_branch}" in listed
+
+
 # ---------------------------------------------------------------------------
 # Scratch cleanup containment (#28818)
 # ---------------------------------------------------------------------------
