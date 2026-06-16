@@ -2166,6 +2166,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, who, current) in res.skipped_per_profile_capped
             ],
             "auto_assigned_default": res.auto_assigned_default,
+            "route_watchdog_hits": [
+                {"task_id": tid, "kind": kind, "action": action}
+                for (tid, kind, action) in res.route_watchdog_hits
+            ],
         }, indent=2))
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
@@ -2203,6 +2207,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    if res.route_watchdog_hits:
+        for tid, kind, action in res.route_watchdog_hits:
+            print(f"Route watchdog ({action}): {tid} [{kind}]")
     return 0
 
 

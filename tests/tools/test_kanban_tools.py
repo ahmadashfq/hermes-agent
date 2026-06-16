@@ -748,17 +748,28 @@ def test_comment_schema_omits_author_override():
 
 
 def test_create_happy_path(worker_env):
+    from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
+
+    # Use a distinct upstream parent (NOT the worker's own task). Listing the
+    # worker's own task as a parent triggers the reroute-inversion guard and
+    # is covered separately by
+    # test_create_self_parent_inverts_to_wake_after_not_deadlock.
+    conn = kb.connect()
+    try:
+        upstream = kb.create_task(conn, title="upstream", assignee="setup")
+    finally:
+        conn.close()
+
     out = kt._handle_create({
         "title": "child task",
         "assignee": "peer",
-        "parents": [worker_env],
+        "parents": [upstream],
     })
     d = json.loads(out)
     assert d["ok"] is True
     assert d["task_id"]
     assert d["status"] == "todo"  # parent isn't done yet
-    from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
         child = kb.get_task(conn, d["task_id"])
@@ -1812,3 +1823,76 @@ def test_board_param_in_all_schemas():
         assert "board" not in schema["parameters"].get("required", []), (
             f"{schema['name']} marks board as required; must be optional"
         )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator-reroute deadlock (hermes-setup board: t_f335b678)
+# ---------------------------------------------------------------------------
+
+def test_create_self_parent_inverts_to_wake_after_not_deadlock(worker_env):
+    """Regression: an orchestrator rerouting its OWN card must not gate the
+    spawned children on that (parked / re-dispatched) card.
+
+    The bug: ``kanban_create(parents=[self])`` was taken literally as "child
+    blocked until self reaches 'done'". The router card never reaches 'done'
+    (it's parked 'blocked' waiting on the children), so the children deadlock
+    in 'todo' and ``promote`` reports "unsatisfied parent dependencies".
+
+    The fix inverts the self-edge to match ``decompose_triage_task``: the
+    spawning task becomes a CHILD of the new task (it wakes only after the
+    child completes), and the child is created with no blocking parent so it
+    is immediately promotable.
+    """
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    root = worker_env  # HERMES_KANBAN_TASK == root, status 'running'
+    out = json.loads(kt._handle_create({
+        "title": "Implement the host-side install",
+        "assignee": "sentinel",
+        "parents": [root],
+    }))
+    assert out["ok"] is True
+    child = out["task_id"]
+    # The inversion was applied and surfaced to the agent.
+    assert "note" in out and root in out["note"]
+
+    conn = kb.connect()
+    try:
+        # The child is NOT gated on the parked router -> promotable now.
+        assert kb.parent_ids(conn, child) == []
+        assert kb.get_task(conn, child).status == "ready"
+        # The router instead wakes AFTER the child (decompose pattern).
+        assert child in kb.parent_ids(conn, root)
+    finally:
+        conn.close()
+
+
+def test_create_preserves_non_self_parents(worker_env):
+    """The reroute inversion is scoped to the worker's own task id only — a
+    genuine upstream dependency passed in ``parents`` must still gate the
+    child normally (status 'todo', no inversion note)."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        other = kb.create_task(conn, title="real upstream dep", assignee="peer")
+    finally:
+        conn.close()
+
+    out = json.loads(kt._handle_create({
+        "title": "downstream work",
+        "assignee": "sentinel",
+        "parents": [other],
+    }))
+    assert out["ok"] is True
+    child = out["task_id"]
+    assert "note" not in out  # no self-edge -> no inversion
+
+    conn = kb.connect()
+    try:
+        assert kb.parent_ids(conn, child) == [other]
+        assert kb.get_task(conn, child).status == "todo"
+    finally:
+        conn.close()

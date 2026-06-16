@@ -2260,6 +2260,7 @@ class OrchestrationSettingsBody(BaseModel):
     default_assignee: Optional[str] = None
     auto_decompose: Optional[bool] = None
     auto_promote_children: Optional[bool] = None
+    routing_watchdog_mode: Optional[str] = None
 
 
 @router.get("/orchestration")
@@ -2276,6 +2277,12 @@ def get_orchestration_settings():
     explicit_default = (kanban_cfg.get("default_assignee") or "").strip()
     auto_decompose = bool(kanban_cfg.get("auto_decompose", True))
     auto_promote_children = bool(kanban_cfg.get("auto_promote_children", True))
+    routing_watchdog_cfg = kanban_cfg.get("routing_watchdog") or {}
+    routing_watchdog_mode = str(
+        routing_watchdog_cfg.get("mode") or "report"
+    ).strip().lower()
+    if routing_watchdog_mode not in {"off", "report", "hold"}:
+        routing_watchdog_mode = "report"
 
     # Resolve fallbacks the same way the decomposer does.
     resolved_orch = explicit_orch
@@ -2299,6 +2306,7 @@ def get_orchestration_settings():
         "default_assignee": explicit_default,
         "auto_decompose": auto_decompose,
         "auto_promote_children": auto_promote_children,
+        "routing_watchdog_mode": routing_watchdog_mode,
         "resolved_orchestrator_profile": resolved_orch,
         "resolved_default_assignee": resolved_default,
         "active_profile": active_default,
@@ -2366,6 +2374,19 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
     if payload.auto_promote_children is not None:
         kanban_section["auto_promote_children"] = bool(payload.auto_promote_children)
+
+    if payload.routing_watchdog_mode is not None:
+        mode = str(payload.routing_watchdog_mode or "").strip().lower()
+        if mode not in {"off", "report", "hold"}:
+            raise HTTPException(
+                status_code=400,
+                detail="routing_watchdog_mode must be one of: off, report, hold",
+            )
+        routing_watchdog = kanban_section.setdefault("routing_watchdog", {})
+        if not isinstance(routing_watchdog, dict):
+            routing_watchdog = {}
+            kanban_section["routing_watchdog"] = routing_watchdog
+        routing_watchdog["mode"] = mode
 
     try:
         save_config(cfg)

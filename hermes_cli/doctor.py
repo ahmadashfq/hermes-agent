@@ -2126,7 +2126,7 @@ def run_doctor(args):
         except ImportError:
             _fail_and_issue(
                 "honcho-ai not installed",
-                "pip install honcho-ai",
+                "pip install honcho-ai==2.1.1",
                 "Honcho is set as memory provider but honcho-ai is not installed",
                 issues,
             )

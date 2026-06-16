@@ -252,3 +252,37 @@ def test_cli_promote_dedupes_duplicate_ids(kanban_home, capsys):
             (child,),
         ).fetchone()["n"]
     assert n == 1
+
+
+def test_router_parent_deadlocks_children_inverse_is_promotable(conn):
+    """Repro of the orchestrator-reroute deadlock (hermes-setup t_f335b678).
+
+    A parked 'blocked' router card linked as the dependency-PARENT of the
+    children it spawned makes those children unpromotable: ``promote`` requires
+    every parent to be terminal ('done'/'archived') and a router card never
+    reaches 'done'. The decompose-correct direction (router waits ON the
+    child) leaves the child immediately promotable.
+    """
+    router = kb.create_task(conn, title="router", assignee="orchestrator")
+    conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (router,))
+    child = kb.create_task(
+        conn, title="impl", assignee="sentinel", parents=[router]
+    )
+
+    # Buggy shape: child gated on a non-terminal router -> deadlock.
+    assert kb.get_task(conn, child).status == "todo"
+    ok, reason = kb.promote_task(conn, child, actor="test")
+    assert ok is False
+    assert "unsatisfied parent dependencies" in (reason or "")
+    assert router in (reason or "")
+
+    # Repair = the decompose direction: router wakes AFTER the child.
+    assert kb.unlink_tasks(conn, parent_id=router, child_id=child)
+    kb.link_tasks(conn, parent_id=child, child_id=router)
+    kb.recompute_ready(conn)
+
+    # The child no longer has a blocking parent and is promotable (ready).
+    assert kb.parent_ids(conn, child) == []
+    assert kb.get_task(conn, child).status == "ready"
+    # The router is now the dependent (the child is its parent).
+    assert child in kb.parent_ids(conn, router)

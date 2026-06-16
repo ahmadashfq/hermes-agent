@@ -535,8 +535,13 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = fall back to active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to active default. |
+| `routing_watchdog.mode` | `report` | Pre-dispatch routing overlay. `report` = detect only, `hold` = block suspicious routes for review, `off` = disable. |
+| `routing_watchdog.min_score` | `0.38` | Minimum lexical match score before the watchdog claims an alternative route is materially better. |
+| `routing_watchdog.min_margin` | `0.14` | Minimum score gap between the current assignee and the best alternative before a mismatch is flagged. |
 
 And the two auxiliary LLM slots:
+
+The routing watchdog is intentionally outside the decomposer. It does not silently rewrite the assignee at dispatch time. Instead it catches three failure classes just before spawn: execution cards stranded on the orchestrator, obvious brand/role mismatches, and low-confidence/ambiguous routes. In `hold` mode it blocks the card with a `review-required:` reason and a `route-watchdog` comment so a human can reassign or explicitly unblock it. This keeps the correction path reviewer-gated instead of hiding routing changes inside the dispatcher.
 
 | Key | Purpose |
 |---|---|
@@ -586,8 +591,8 @@ All routes are mounted under `/api/plugins/kanban/` and protected by the dashboa
 | `GET` | `/profiles` | List installed profiles with their descriptions (consumed by the dashboard's profile-description editor and the orchestrator picker). |
 | `PATCH` | `/profiles/:name` | Set or clear a profile's description (user-authored — `description_auto: false`). Returns `{ok, profile, description}`. |
 | `POST` | `/profiles/:name/describe-auto` | Generate a description for a profile via `auxiliary.profile_describer`. Persists with `description_auto: true` so the dashboard can surface a "review" badge. |
-| `GET` | `/orchestration` | Read the kanban orchestration settings (`orchestrator_profile`, `default_assignee`, `auto_decompose`) plus the *resolved* effective values after fallbacks. |
-| `PUT` | `/orchestration` | Update one or more of the three orchestration keys in `config.yaml`. Validates that non-empty profile names actually exist. |
+| `GET` | `/orchestration` | Read the kanban orchestration settings (`orchestrator_profile`, `default_assignee`, `auto_decompose`, `routing_watchdog_mode`) plus the *resolved* effective values after fallbacks. |
+| `PUT` | `/orchestration` | Update one or more orchestration keys in `config.yaml`. Validates that non-empty profile names actually exist and that `routing_watchdog_mode` is one of `off/report/hold`. |
 | `POST` | `/links` | Add a dependency (`parent_id` → `child_id`) |
 | `DELETE` | `/links?parent_id=…&child_id=…` | Remove a dependency |
 | `POST` | `/dispatch?max=…&dry_run=…` | Nudge the dispatcher — skip the 60 s wait |

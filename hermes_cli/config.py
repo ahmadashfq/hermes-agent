@@ -2130,6 +2130,23 @@ DEFAULT_CONFIG = {
         # assignee to any installed profile. When unset, falls back to the
         # default profile. A task never ends up with assignee=None.
         "default_assignee": "",
+        # Fast-correction routing overlay that runs just before dispatch.
+        # Modes:
+        #   off    — disabled
+        #   report — detect suspicious routes but don't change board state
+        #   hold   — block suspicious routes with a review-required reason
+        #            before any worker is spawned
+        # This is intentionally outside the core decomposer: it is a
+        # reviewer-gated watchdog, not a silent rerouter.
+        "routing_watchdog": {
+            "mode": "report",
+            # Minimum lexical match score required before the watchdog will
+            # claim another profile is a materially better fit.
+            "min_score": 0.38,
+            # Minimum gap between the current assignee score and the best
+            # alternative score before the watchdog treats it as a mismatch.
+            "min_margin": 0.14,
+        },
         # Per-profile concurrency cap (#21582). When set to a positive int,
         # no single profile can have more than N workers running at once,
         # even if the global max_in_progress / max_spawn caps would allow
@@ -2168,6 +2185,14 @@ DEFAULT_CONFIG = {
         # Env scrubbing (strips *_API_KEY, *_TOKEN, *_SECRET, ...) and the
         # tool whitelist apply identically in both modes.
         "mode": "project",
+        # Max seconds for the script process itself.
+        "timeout": 300,
+        # Max seconds for one sandbox tool-call round-trip (child stub ↔ parent).
+        # Raise this alongside ``timeout`` when long-lived execute_code tasks
+        # make slow or blocking tool calls.
+        "rpc_timeout": 300,
+        # Max number of Hermes tool calls the script may make.
+        "max_tool_calls": 50,
     },
 
     # Tool Search (progressive disclosure for large tool surfaces).
