@@ -290,6 +290,14 @@ def decompose_task(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
 
+    active_board = kb.get_current_board()
+    if task.brand and task.brand != active_board:
+        return DecomposeOutcome(
+            task_id,
+            False,
+            f"task brand {task.brand!r} does not match active board {active_board!r}",
+        )
+
     cfg = _load_config()
     orchestrator = _resolve_orchestrator_profile(cfg)
     default_assignee = _resolve_default_assignee(cfg)
@@ -447,6 +455,8 @@ def decompose_task(
                 children=children,
                 author=audit_author,
                 auto_promote=auto_promote,
+                rationale=parsed.get("rationale") if isinstance(parsed.get("rationale"), str) else None,
+                roster_snapshot=roster,
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")

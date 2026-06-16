@@ -345,3 +345,17 @@ def test_decompose_no_aux_client_configured(kanban_home):
 
     assert outcome.ok is False
     assert "no auxiliary client" in outcome.reason
+
+
+def test_decompose_rejects_brand_mismatch(kanban_home, monkeypatch):
+    kb.create_board("brand-a")
+    kb.create_board("brand-b")
+    with kb.connect(board="brand-a") as conn:
+        tid = kb.create_task(conn, title="ship a feature", triage=True)
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb.kanban_db_path(board="brand-a")))
+    with kb.scoped_current_board("brand-b"):
+        outcome = decomp.decompose_task(tid, author="me")
+
+    assert outcome.ok is False
+    assert "does not match active board" in outcome.reason

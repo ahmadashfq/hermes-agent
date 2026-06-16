@@ -816,6 +816,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                board=board,
             )
             new_task = kb.get_task(conn, new_tid)
             return _ok(
