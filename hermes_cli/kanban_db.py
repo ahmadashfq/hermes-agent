@@ -3170,6 +3170,72 @@ def update_delivery_release(
     )
 
 
+_LEGACY_NON_AUTHORITATIVE_DELIVERY_KEYS = (
+    "historical_snapshot",
+    "historical_receipt_state_preserved",
+    "recorded_run",
+    "receipt_repair",
+    "receipt_refresh",
+)
+
+
+def _normalize_non_authoritative_delivery_history(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Move legacy historical receipt data under an explicit audit-only envelope.
+
+    The rollout bug fixed by the fourth structured-card-state remediation was
+    not that history existed, but that stale receipt snapshots lived as regular
+    nested dicts inside the same delivery-evidence surface as authoritative
+    current truth. Flattening or naive consumers could recurse those dicts and
+    treat stale ``readable=false`` / ``delivery_verdict=blocked`` values as if
+    they were current. To make the separation mechanically safer, we preserve
+    historical payloads only as serialized audit entries that require an
+    explicit opt-in parse step.
+    """
+
+    normalized = dict(payload)
+    audit_entries: list[dict[str, Any]] = []
+
+    existing = normalized.get("non_authoritative_audit_history")
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, dict):
+                audit_entries.append(dict(item))
+
+    seen: set[tuple[str, str]] = set()
+    for entry in audit_entries:
+        label = str(entry.get("label") or "").strip()
+        snapshot_json = str(entry.get("snapshot_json") or "")
+        if label and snapshot_json:
+            seen.add((label, snapshot_json))
+
+    for key in _LEGACY_NON_AUTHORITATIVE_DELIVERY_KEYS:
+        if key not in normalized:
+            continue
+        snapshot = normalized.pop(key)
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        dedupe_key = (key, snapshot_json)
+        if dedupe_key in seen:
+            continue
+        audit_entries.append(
+            {
+                "label": key,
+                "authoritative": False,
+                "encoding": "json_string",
+                "snapshot_json": snapshot_json,
+            }
+        )
+        seen.add(dedupe_key)
+
+    if audit_entries:
+        normalized["non_authoritative_audit_history"] = audit_entries
+    else:
+        normalized.pop("non_authoritative_audit_history", None)
+
+    return normalized
+
+
 def write_run_delivery_evidence(
     conn: sqlite3.Connection,
     run_id: int,
@@ -3188,9 +3254,10 @@ def write_run_delivery_evidence(
         metadata = {}
     current = metadata.get("delivery_evidence")
     if merge and isinstance(current, dict):
-        metadata["delivery_evidence"] = _deep_merge_dicts(current, delivery_evidence)
+        merged_delivery = _deep_merge_dicts(current, delivery_evidence)
     else:
-        metadata["delivery_evidence"] = dict(delivery_evidence)
+        merged_delivery = dict(delivery_evidence)
+    metadata["delivery_evidence"] = _normalize_non_authoritative_delivery_history(merged_delivery)
     with write_txn(conn):
         conn.execute(
             "UPDATE task_runs SET metadata = ? WHERE id = ?",

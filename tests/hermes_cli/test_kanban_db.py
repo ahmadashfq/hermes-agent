@@ -306,6 +306,59 @@ def test_write_run_delivery_evidence_merges_existing_metadata(kanban_home):
     assert runs[-1].metadata["delivery_evidence"]["test_receipts"][0]["name"] == "pytest"
 
 
+def test_write_run_delivery_evidence_moves_legacy_history_into_audit_envelope(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="evidence history separation")
+        claimed = kb.claim_task(conn, tid, claimer="test-worker")
+        assert claimed is not None
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        run_id = task.current_run_id
+        assert run_id is not None
+
+        merged = kb.write_run_delivery_evidence(
+            conn,
+            run_id,
+            {
+                "authoritative_current_state": {
+                    "delivery_verdict": "needs_review",
+                    "artifact_checks": [{"path": "/tmp/current.md", "readable": True}],
+                },
+                "historical_snapshot": {
+                    "delivery_verdict": "blocked",
+                    "artifact_checks": [{"path": "/tmp/stale.md", "readable": False}],
+                },
+                "historical_receipt_state_preserved": {
+                    "note": "stale repaired receipt",
+                    "delivery_verdict": "blocked",
+                },
+                "recorded_run": {
+                    "run_id": 25,
+                    "status": "blocked",
+                },
+            },
+        )
+        runs = kb.list_runs(conn, tid)
+
+    evidence = merged["delivery_evidence"]
+    assert "historical_snapshot" not in evidence
+    assert "historical_receipt_state_preserved" not in evidence
+    assert "recorded_run" not in evidence
+    assert evidence["authoritative_current_state"]["delivery_verdict"] == "needs_review"
+    assert len(evidence["non_authoritative_audit_history"]) == 3
+    assert {entry["label"] for entry in evidence["non_authoritative_audit_history"]} == {
+        "historical_snapshot",
+        "historical_receipt_state_preserved",
+        "recorded_run",
+    }
+    assert all(entry["authoritative"] is False for entry in evidence["non_authoritative_audit_history"])
+    assert all(entry["encoding"] == "json_string" for entry in evidence["non_authoritative_audit_history"])
+    assert all("snapshot_json" in entry for entry in evidence["non_authoritative_audit_history"])
+    assert runs[-1].metadata is not None
+    assert "historical_snapshot" not in runs[-1].metadata["delivery_evidence"]
+    assert "non_authoritative_audit_history" in runs[-1].metadata["delivery_evidence"]
+
+
 def test_backfill_delivery_states_requires_verified_fields(kanban_home, tmp_path):
     artifact = tmp_path / "backfill-artifact.md"
     artifact.write_text("backfill\n", encoding="utf-8")
