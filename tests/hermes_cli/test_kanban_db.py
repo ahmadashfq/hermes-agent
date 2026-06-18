@@ -278,6 +278,47 @@ def test_delivery_state_derives_blocked_for_unreadable_artifact(kanban_home, tmp
     assert state["delivery_verdict_reason"] == "primary artifact unreadable"
 
 
+def test_describe_delivery_state_surfaces_review_handle_and_surface(tmp_path):
+    artifact = tmp_path / "delivery-artifact.md"
+    artifact.write_text("artifact\n", encoding="utf-8")
+
+    snapshot = {
+        "stage": "implementation",
+        "delivery_verdict": "needs_review",
+        "delivery_verdict_reason": "stage output awaits explicit review",
+        "artifact": {
+            "primary_ref": {"kind": "file", "path": str(artifact), "label": "bundle"},
+            "refs": [],
+            "readable": True,
+        },
+        "proof": {
+            "proof_status": "passed",
+            "tests_run": {"count": 2, "items": []},
+            "tests_passed": {"count": 2, "items": []},
+        },
+        "review": {
+            "status": "requested",
+            "reviewer_identity": "reviewer",
+            "evidence_ref": {"kind": "task", "task_id": "t_review_gate"},
+            "surface_ref": {
+                "kind": "git_compare",
+                "base_ref": "wt/base",
+                "head_ref": "wt/head",
+                "head_commit": "abc123def",
+            },
+        },
+        "merge": {"status": "not_applicable"},
+        "release": {"status": "not_applicable"},
+        "workspace": {"kind": "worktree", "branch_name": "wt/head", "base_ref": "wt/base"},
+    }
+
+    lines = kb.describe_delivery_state(snapshot)
+
+    assert any("review surface:" in line and "wt/base..wt/head" in line for line in lines)
+    assert any("review handle: task t_review_gate" in line for line in lines)
+    assert any("proof: passed" in line and "tests_run=2" in line for line in lines)
+
+
 def test_write_run_delivery_evidence_merges_existing_metadata(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="evidence merge")
@@ -526,6 +567,43 @@ def test_build_worker_context_uses_live_worktree_branch_and_kind(kanban_home, tm
     assert f"Workspace: worktree @ {target}" in context
     assert f"Branch:   wt/{tid}" in context
     assert "Workspace: scratch" not in context
+
+
+def test_build_worker_context_summarizes_delivery_review_surface(kanban_home, tmp_path):
+    artifact = tmp_path / "delivery-artifact.md"
+    artifact.write_text("artifact\n", encoding="utf-8")
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="delivery summary task")
+        kb.init_task_delivery_state(
+            conn,
+            tid,
+            stage="implementation",
+            workflow_stream_id="t_stream",
+            artifact_ref={"kind": "file", "path": str(artifact), "label": "bundle"},
+            review={
+                "status": "requested",
+                "reviewer_identity": "reviewer",
+                "evidence_ref": {"kind": "task", "task_id": "t_review_gate"},
+                "surface_ref": {
+                    "kind": "git_compare",
+                    "base_ref": "wt/base",
+                    "head_ref": "wt/head",
+                    "head_commit": "abc123def",
+                },
+            },
+            proof={
+                "proof_status": "passed",
+                "tests_run": {"count": 1, "items": ["pytest -q suite"]},
+                "tests_passed": {"count": 1, "items": ["1 passed"]},
+            },
+        )
+        context = kb.build_worker_context(conn, tid)
+
+    assert "## Delivery state" in context
+    assert "review surface: wt/base..wt/head | head abc123def" in context
+    assert "review handle: task t_review_gate" in context
+    assert "proof: passed | tests_run=1 | tests_passed=1" in context
 
 
 def test_build_worker_context_does_not_fabricate_worktree_branch_for_scratch_workspace(

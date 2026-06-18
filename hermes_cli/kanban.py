@@ -1533,6 +1533,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
             f"{task.delivery_state.get('stage', '?')} / "
             f"{task.delivery_state.get('delivery_verdict', '?')}"
         )
+        reason = str(task.delivery_state.get("delivery_verdict_reason") or "").strip()
+        if reason:
+            print(f"  delivery-reason: {reason}")
     if task.skills:
         print(f"  skills:    {', '.join(task.skills)}")
     if task.model_override:
@@ -1603,6 +1606,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print()
         print("Latest summary:")
         print(latest_summary)
+    if task.delivery_state:
+        print()
+        print("Delivery state:")
+        for line in kb.describe_delivery_state(task.delivery_state):
+            print(f"  {line}")
     if comments:
         print()
         print(f"Comments ({len(comments)}):")

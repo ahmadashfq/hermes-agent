@@ -1082,6 +1082,149 @@ def delivery_artifact_readable(ref: Optional[dict[str, Any]]) -> bool:
         return False
 
 
+def format_delivery_ref(ref: Optional[dict[str, Any]]) -> Optional[str]:
+    """Render a compact human-readable string for a structured delivery ref."""
+    if not isinstance(ref, dict) or not ref:
+        return None
+    label = str(ref.get("label") or "").strip()
+    prefix = f"{label}: " if label else ""
+    kind = str(ref.get("kind") or "ref").strip() or "ref"
+
+    if kind == "file":
+        path = str(ref.get("path") or "").strip()
+        if path:
+            return f"{prefix}{path}"
+    elif kind == "url":
+        url = str(ref.get("url") or "").strip()
+        if url:
+            return f"{prefix}{url}"
+    elif kind == "task":
+        task_id = str(ref.get("task_id") or "").strip()
+        title = str(ref.get("title") or "").strip()
+        if task_id and title:
+            return f"{prefix}task {task_id} ({title})"
+        if task_id:
+            return f"{prefix}task {task_id}"
+    elif kind in {"git_compare", "compare_range", "branch_compare"}:
+        base_ref = str(ref.get("base_ref") or "").strip()
+        head_ref = str(ref.get("head_ref") or "").strip()
+        head_commit = str(ref.get("head_commit") or ref.get("commit") or "").strip()
+        compare = "..".join(part for part in [base_ref, head_ref] if part)
+        bits = [compare or kind]
+        if head_commit:
+            bits.append(f"head {head_commit}")
+        return f"{prefix}{' | '.join(bits)}"
+    elif kind == "branch":
+        branch_name = str(ref.get("branch_name") or ref.get("head_ref") or "").strip()
+        head_commit = str(ref.get("head_commit") or ref.get("commit") or "").strip()
+        bits = [branch_name or kind]
+        if head_commit:
+            bits.append(f"commit {head_commit}")
+        return f"{prefix}{' | '.join(bits)}"
+
+    try:
+        return prefix + json.dumps(ref, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return prefix + str(ref)
+
+
+
+def describe_delivery_state(snapshot: Optional[dict[str, Any]]) -> list[str]:
+    """Summarize a delivery-state snapshot for CLI / worker-context display."""
+    if not isinstance(snapshot, dict) or not snapshot:
+        return []
+
+    lines: list[str] = []
+    stage = str(snapshot.get("stage") or "?")
+    verdict = str(snapshot.get("delivery_verdict") or "?")
+    reason = str(snapshot.get("delivery_verdict_reason") or "").strip()
+    headline = f"stage: {stage} | verdict: {verdict}"
+    if reason:
+        headline += f" | reason: {reason}"
+    lines.append(headline)
+
+    artifact = snapshot.get("artifact") or {}
+    primary_ref = format_delivery_ref(artifact.get("primary_ref"))
+    if primary_ref:
+        readable = artifact.get("readable")
+        suffix = ""
+        if readable is True:
+            suffix = " (readable)"
+        elif readable is False:
+            suffix = " (unreadable)"
+        lines.append(f"artifact: {primary_ref}{suffix}")
+    refs = artifact.get("refs")
+    if isinstance(refs, list) and refs:
+        rendered_refs = [text for text in (format_delivery_ref(ref) for ref in refs) if text]
+        extras = [text for text in rendered_refs if text != primary_ref]
+        if extras:
+            lines.append("artifact refs: " + " ; ".join(extras[:3]))
+            if len(extras) > 3:
+                lines.append(f"artifact refs: +{len(extras) - 3} more")
+
+    proof = snapshot.get("proof") or {}
+    proof_status = str(proof.get("proof_status") or "not_started")
+    tests_run = proof.get("tests_run") or {}
+    tests_passed = proof.get("tests_passed") or {}
+    run_count = int(tests_run.get("count") or 0)
+    passed_count = int(tests_passed.get("count") or 0)
+    proof_bits = [f"proof: {proof_status}"]
+    if run_count:
+        proof_bits.append(f"tests_run={run_count}")
+    if passed_count:
+        proof_bits.append(f"tests_passed={passed_count}")
+    lines.append(" | ".join(proof_bits))
+
+    review = snapshot.get("review") or {}
+    review_status = str(review.get("status") or "not_requested")
+    reviewer = str(review.get("reviewer_identity") or "").strip()
+    review_line = f"review: {review_status}"
+    if reviewer:
+        review_line += f" by {reviewer}"
+    lines.append(review_line)
+    review_surface = format_delivery_ref(review.get("surface_ref"))
+    if review_surface:
+        lines.append(f"review surface: {review_surface}")
+    evidence_ref = format_delivery_ref(review.get("evidence_ref"))
+    if evidence_ref and evidence_ref != review_surface:
+        lines.append(f"review handle: {evidence_ref}")
+
+    merge = snapshot.get("merge") or {}
+    merge_status = str(merge.get("status") or "not_applicable")
+    if merge_status != "not_applicable" or merge.get("target") or merge.get("commit") or merge.get("evidence_ref"):
+        merge_bits = [f"merge: {merge_status}"]
+        if merge.get("target"):
+            merge_bits.append(f"target={merge.get('target')}")
+        if merge.get("commit"):
+            merge_bits.append(f"commit={merge.get('commit')}")
+        merge_evidence = format_delivery_ref(merge.get("evidence_ref"))
+        if merge_evidence:
+            merge_bits.append(f"evidence={merge_evidence}")
+        lines.append(" | ".join(merge_bits))
+
+    release = snapshot.get("release") or {}
+    release_status = str(release.get("status") or "not_applicable")
+    if release_status != "not_applicable" or release.get("target") or release.get("evidence_ref"):
+        release_bits = [f"release: {release_status}"]
+        if release.get("target"):
+            release_bits.append(f"target={release.get('target')}")
+        release_evidence = format_delivery_ref(release.get("evidence_ref"))
+        if release_evidence:
+            release_bits.append(f"evidence={release_evidence}")
+        lines.append(" | ".join(release_bits))
+
+    workspace = snapshot.get("workspace") or {}
+    if workspace.get("kind") == "worktree":
+        worktree_bits = ["workspace: worktree"]
+        if workspace.get("branch_name"):
+            worktree_bits.append(f"branch={workspace.get('branch_name')}")
+        if workspace.get("base_ref"):
+            worktree_bits.append(f"base={workspace.get('base_ref')}")
+        lines.append(" | ".join(worktree_bits))
+    return lines
+
+
+
 def _delivery_workspace_snapshot(task: Task) -> dict[str, Any]:
     return {
         "kind": task.workspace_kind,
@@ -1209,6 +1352,7 @@ def _normalize_delivery_state(task: Task, state: dict[str, Any]) -> dict[str, An
     review.setdefault("status", "not_requested")
     review.setdefault("reviewer_identity", None)
     review.setdefault("evidence_ref", None)
+    review.setdefault("surface_ref", None)
     normalized["review"] = review
 
     merge_raw = normalized.get("merge")
@@ -8179,11 +8323,13 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
 
     if task.delivery_state:
         lines.append("## Delivery state")
+        for detail in describe_delivery_state(task.delivery_state):
+            lines.append(f"- {detail}")
         try:
             state_text = json.dumps(task.delivery_state, ensure_ascii=False, sort_keys=True)
         except Exception:
             state_text = str(task.delivery_state)
-        lines.append(f"`{_cap(state_text)}`")
+        lines.append(f"_snapshot_: `{_cap(state_text)}`")
         lines.append("")
 
     # Attachments — files uploaded to this task (PDFs, source docs,

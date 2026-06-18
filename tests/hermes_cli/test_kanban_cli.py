@@ -230,6 +230,42 @@ def test_run_slash_show_includes_comments(kanban_home):
     assert "performance section" in show
 
 
+def test_run_slash_show_renders_delivery_review_surface(kanban_home, tmp_path):
+    artifact = tmp_path / "delivery.md"
+    artifact.write_text("delivery\n", encoding="utf-8")
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="review surface task")
+        kb.init_task_delivery_state(
+            conn,
+            tid,
+            stage="implementation",
+            workflow_stream_id="t_stream",
+            artifact_ref={"kind": "file", "path": str(artifact), "label": "bundle"},
+            review={
+                "status": "requested",
+                "reviewer_identity": "reviewer",
+                "evidence_ref": {"kind": "task", "task_id": "t_review_gate"},
+                "surface_ref": {
+                    "kind": "git_compare",
+                    "base_ref": "wt/base",
+                    "head_ref": "wt/head",
+                    "head_commit": "abc123def",
+                },
+            },
+            proof={
+                "proof_status": "passed",
+                "tests_run": {"count": 1, "items": ["pytest -q"]},
+                "tests_passed": {"count": 1, "items": ["1 passed"]},
+            },
+        )
+
+    show = kc.run_slash(f"show {tid}")
+    assert "Delivery state:" in show
+    assert "review surface: wt/base..wt/head | head abc123def" in show
+    assert "review handle: task t_review_gate" in show
+
+
 def test_run_slash_comment_max_len_trims_long_body(kanban_home):
     out = kc.run_slash("create 'x'")
     import re
