@@ -254,6 +254,10 @@ def test_delivery_state_helpers_persist_snapshot_and_event(kanban_home, tmp_path
         events = kb.list_events(conn, tid)
 
     assert state["delivery_verdict"] == "needs_review"
+    assert state["truth_surfaces"]["implemented"] == "implemented"
+    assert state["truth_surfaces"]["accepted"] == "needs_review"
+    assert state["provenance"]["status"] == "available"
+    assert state["acceptance"]["receipt"]["artifact_readable"] is True
     assert task is not None
     assert task.delivery_state is not None
     assert task.delivery_state["artifact"]["readable"] is True
@@ -317,6 +321,74 @@ def test_describe_delivery_state_surfaces_review_handle_and_surface(tmp_path):
     assert any("review surface:" in line and "wt/base..wt/head" in line for line in lines)
     assert any("review handle: task t_review_gate" in line for line in lines)
     assert any("proof: passed" in line and "tests_run=2" in line for line in lines)
+
+
+def test_describe_delivery_state_surfaces_truth_acceptance_and_provenance(tmp_path):
+    artifact = tmp_path / "delivery-artifact.md"
+    artifact.write_text("artifact\n", encoding="utf-8")
+
+    snapshot = {
+        "stage": "implementation",
+        "delivery_verdict": "needs_review",
+        "delivery_verdict_reason": "stage output awaits explicit review",
+        "truth_surfaces": {
+            "implemented": "implemented",
+            "accepted": "needs_review",
+            "merged": "not_applicable",
+            "released": "not_applicable",
+            "provenance": "available",
+        },
+        "artifact": {
+            "primary_ref": {"kind": "file", "path": str(artifact), "label": "bundle"},
+            "refs": [],
+            "readable": True,
+        },
+        "proof": {
+            "proof_status": "passed",
+            "tests_run": {"count": 2, "items": []},
+            "tests_passed": {"count": 2, "items": []},
+        },
+        "review": {
+            "status": "requested",
+            "reviewer_identity": "reviewer",
+            "evidence_ref": {"kind": "task", "task_id": "t_review_gate"},
+            "surface_ref": {
+                "kind": "git_compare",
+                "base_ref": "wt/base",
+                "head_ref": "wt/head",
+                "head_commit": "abc123def",
+            },
+        },
+        "acceptance": {
+            "status": "pending",
+            "accepted_by": "reviewer",
+            "receipt": {
+                "branch_name": "wt/head",
+                "head_commit": "abc123def",
+                "proof_status": "passed",
+                "review_status": "requested",
+            },
+        },
+        "provenance": {
+            "status": "available",
+            "packet": {
+                "branch_name": "wt/head",
+                "head_commit": "abc123def",
+                "remote_audit_refs": [{"kind": "task", "task_id": "t_review_gate"}],
+            },
+        },
+        "merge": {"status": "not_applicable"},
+        "release": {"status": "not_applicable"},
+        "workspace": {"kind": "worktree", "branch_name": "wt/head", "base_ref": "wt/base"},
+    }
+
+    lines = kb.describe_delivery_state(snapshot)
+
+    assert any("truth surfaces:" in line and "accepted=needs_review" in line for line in lines)
+    assert any("acceptance: pending by reviewer" == line for line in lines)
+    assert any("acceptance receipt:" in line and "sha=abc123def" in line for line in lines)
+    assert any("provenance: available" == line for line in lines)
+    assert any("provenance packet:" in line and "audit_refs=1" in line for line in lines)
 
 
 def test_write_run_delivery_evidence_merges_existing_metadata(kanban_home):
@@ -640,11 +712,15 @@ def test_live_worker_workspace_snapshot_uses_live_worktree_checkout(
 
     assert task is not None
     snap = kb.live_worker_workspace_snapshot(task)
-    assert snap == {
-        "workspace_kind": "worktree",
-        "workspace_path": str(worktree.resolve()),
-        "branch_name": "wt/live",
-    }
+    assert snap["workspace_kind"] == "worktree"
+    assert snap["workspace_path"] == str(worktree.resolve())
+    assert snap["branch_name"] == "wt/live"
+    assert snap["head_commit"] == subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
 
 def test_complete_task_requires_merged_branch_even_with_green_ci(

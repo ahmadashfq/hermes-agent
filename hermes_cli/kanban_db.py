@@ -191,15 +191,20 @@ def live_worker_workspace_snapshot(task) -> dict[str, str]:
     if not branch_name:
         return {}
 
+    head_commit = _git_ref_commit(path, "HEAD")
+
     try:
         resolved = str(path.resolve(strict=False))
     except OSError:
         resolved = str(path)
-    return {
+    snapshot = {
         "workspace_kind": "worktree",
         "workspace_path": resolved,
         "branch_name": branch_name,
     }
+    if head_commit:
+        snapshot["head_commit"] = head_commit
+    return snapshot
 
 
 # Grace period after a task transitions to ``running`` during which
@@ -1143,6 +1148,17 @@ def describe_delivery_state(snapshot: Optional[dict[str, Any]]) -> list[str]:
         headline += f" | reason: {reason}"
     lines.append(headline)
 
+    truth_surfaces = snapshot.get("truth_surfaces") or {}
+    if isinstance(truth_surfaces, dict) and truth_surfaces:
+        lines.append(
+            "truth surfaces: "
+            + " | ".join(
+                f"{key}={truth_surfaces.get(key)}"
+                for key in ["implemented", "accepted", "merged", "released", "provenance"]
+                if truth_surfaces.get(key) is not None
+            )
+        )
+
     artifact = snapshot.get("artifact") or {}
     primary_ref = format_delivery_ref(artifact.get("primary_ref"))
     if primary_ref:
@@ -1189,6 +1205,44 @@ def describe_delivery_state(snapshot: Optional[dict[str, Any]]) -> list[str]:
     if evidence_ref and evidence_ref != review_surface:
         lines.append(f"review handle: {evidence_ref}")
 
+    acceptance = snapshot.get("acceptance") or {}
+    acceptance_status = str(acceptance.get("status") or "pending").strip()
+    acceptance_line = f"acceptance: {acceptance_status}"
+    if acceptance.get("accepted_by"):
+        acceptance_line += f" by {acceptance.get('accepted_by')}"
+    lines.append(acceptance_line)
+    acceptance_receipt = acceptance.get("receipt") or {}
+    if isinstance(acceptance_receipt, dict) and acceptance_receipt:
+        receipt_bits = []
+        if acceptance_receipt.get("branch_name"):
+            receipt_bits.append(f"branch={acceptance_receipt.get('branch_name')}")
+        if acceptance_receipt.get("head_commit"):
+            receipt_bits.append(f"sha={acceptance_receipt.get('head_commit')}")
+        proof_status = acceptance_receipt.get("proof_status")
+        if proof_status:
+            receipt_bits.append(f"proof={proof_status}")
+        review_status = acceptance_receipt.get("review_status")
+        if review_status:
+            receipt_bits.append(f"review={review_status}")
+        if receipt_bits:
+            lines.append("acceptance receipt: " + " | ".join(receipt_bits))
+
+    provenance = snapshot.get("provenance") or {}
+    provenance_status = str(provenance.get("status") or "missing").strip()
+    lines.append(f"provenance: {provenance_status}")
+    packet = provenance.get("packet") or {}
+    if isinstance(packet, dict) and packet:
+        packet_bits = []
+        if packet.get("branch_name"):
+            packet_bits.append(f"branch={packet.get('branch_name')}")
+        if packet.get("head_commit"):
+            packet_bits.append(f"sha={packet.get('head_commit')}")
+        remote_refs = packet.get("remote_audit_refs")
+        if isinstance(remote_refs, list) and remote_refs:
+            packet_bits.append(f"audit_refs={len(remote_refs)}")
+        if packet_bits:
+            lines.append("provenance packet: " + " | ".join(packet_bits))
+
     merge = snapshot.get("merge") or {}
     merge_status = str(merge.get("status") or "not_applicable")
     if merge_status != "not_applicable" or merge.get("target") or merge.get("commit") or merge.get("evidence_ref"):
@@ -1226,12 +1280,134 @@ def describe_delivery_state(snapshot: Optional[dict[str, Any]]) -> list[str]:
 
 
 def _delivery_workspace_snapshot(task: Task) -> dict[str, Any]:
-    return {
+    snapshot = {
         "kind": task.workspace_kind,
         "path": task.workspace_path,
         "branch_name": task.branch_name,
         "base_ref": task.workspace_base_ref,
         "base_commit": task.workspace_base_commit,
+    }
+    live = live_worker_workspace_snapshot(task)
+    if isinstance(live, dict):
+        if live.get("workspace_path"):
+            snapshot["path"] = live.get("workspace_path")
+        if live.get("branch_name"):
+            snapshot["branch_name"] = live.get("branch_name")
+        if live.get("head_commit"):
+            snapshot["head_commit"] = live.get("head_commit")
+
+    path_text = str(snapshot.get("path") or "").strip()
+    if snapshot.get("kind") == "worktree" and path_text:
+        path = Path(path_text).expanduser()
+        if path.exists():
+            snapshot.setdefault("head_commit", _git_ref_commit(path, "HEAD"))
+            base_ref = str(snapshot.get("base_ref") or "").strip()
+            if base_ref and not snapshot.get("base_commit"):
+                snapshot["base_commit"] = _git_ref_commit(path, base_ref)
+    return snapshot
+
+
+def _build_acceptance_receipt(snapshot: dict[str, Any]) -> dict[str, Any]:
+    artifact = snapshot.get("artifact") or {}
+    proof = snapshot.get("proof") or {}
+    review = snapshot.get("review") or {}
+    workspace = snapshot.get("workspace") or {}
+    return {
+        "task_id": snapshot.get("task_id"),
+        "workflow_stream_id": snapshot.get("workflow_stream_id"),
+        "stage": snapshot.get("stage"),
+        "task_status": snapshot.get("task_status"),
+        "artifact_ref": artifact.get("primary_ref"),
+        "artifact_readable": artifact.get("readable"),
+        "workspace_kind": workspace.get("kind"),
+        "workspace_path": workspace.get("path"),
+        "branch_name": workspace.get("branch_name"),
+        "base_ref": workspace.get("base_ref"),
+        "base_commit": workspace.get("base_commit"),
+        "head_commit": workspace.get("head_commit"),
+        "proof_status": proof.get("proof_status"),
+        "tests_run": proof.get("tests_run"),
+        "tests_passed": proof.get("tests_passed"),
+        "test_evidence_refs": proof.get("test_evidence_refs"),
+        "review_status": review.get("status"),
+        "reviewer_identity": review.get("reviewer_identity"),
+        "review_surface_ref": review.get("surface_ref"),
+        "review_evidence_ref": review.get("evidence_ref"),
+        "generated_from_delivery_state_at": int(time.time()),
+    }
+
+
+def _build_provenance_packet(snapshot: dict[str, Any]) -> dict[str, Any]:
+    artifact = snapshot.get("artifact") or {}
+    proof = snapshot.get("proof") or {}
+    review = snapshot.get("review") or {}
+    merge = snapshot.get("merge") or {}
+    release = snapshot.get("release") or {}
+    workspace = snapshot.get("workspace") or {}
+    refs: list[dict[str, Any]] = []
+    for ref in [
+        artifact.get("primary_ref"),
+        review.get("surface_ref"),
+        review.get("evidence_ref"),
+        merge.get("evidence_ref"),
+        release.get("evidence_ref"),
+    ]:
+        if isinstance(ref, dict) and ref:
+            refs.append(dict(ref))
+    for ref in artifact.get("refs") or []:
+        if isinstance(ref, dict) and ref:
+            refs.append(dict(ref))
+    return {
+        "task_id": snapshot.get("task_id"),
+        "workflow_stream_id": snapshot.get("workflow_stream_id"),
+        "branch_name": workspace.get("branch_name"),
+        "base_ref": workspace.get("base_ref"),
+        "base_commit": workspace.get("base_commit"),
+        "head_commit": workspace.get("head_commit"),
+        "workspace_path": workspace.get("path"),
+        "artifact_ref": artifact.get("primary_ref"),
+        "artifact_refs": artifact.get("refs") or [],
+        "artifact_readable": artifact.get("readable"),
+        "proof_status": proof.get("proof_status"),
+        "review_status": review.get("status"),
+        "merge_status": merge.get("status"),
+        "release_status": release.get("status"),
+        "remote_audit_refs": refs,
+        "generated_from_delivery_state_at": int(time.time()),
+    }
+
+
+def _derive_truth_surfaces(snapshot: dict[str, Any]) -> dict[str, str]:
+    artifact = snapshot.get("artifact") or {}
+    review = snapshot.get("review") or {}
+    merge = snapshot.get("merge") or {}
+    release = snapshot.get("release") or {}
+    provenance = snapshot.get("provenance") or {}
+
+    implemented = "missing"
+    if artifact.get("primary_ref") is not None:
+        implemented = "implemented" if artifact.get("readable") is not False else "blocked"
+
+    review_status = str(review.get("status") or "").strip()
+    stage = str(snapshot.get("stage") or "").strip()
+    if stage in DELIVERY_REVIEW_GATE_STAGES and review_status not in {"approved", "not_applicable"}:
+        accepted = "needs_review"
+    elif review_status == "approved":
+        accepted = "accepted"
+    elif review_status == "not_applicable":
+        accepted = "not_applicable"
+    else:
+        accepted = "pending"
+
+    merge_status = str(merge.get("status") or "not_applicable").strip() or "not_applicable"
+    release_status = str(release.get("status") or "not_applicable").strip() or "not_applicable"
+    provenance_status = str(provenance.get("status") or "missing").strip() or "missing"
+    return {
+        "implemented": implemented,
+        "accepted": accepted,
+        "merged": merge_status,
+        "released": release_status,
+        "provenance": provenance_status,
     }
 
 
@@ -1355,6 +1531,18 @@ def _normalize_delivery_state(task: Task, state: dict[str, Any]) -> dict[str, An
     review.setdefault("surface_ref", None)
     normalized["review"] = review
 
+    acceptance_raw = normalized.get("acceptance")
+    acceptance: dict[str, Any] = dict(acceptance_raw) if isinstance(acceptance_raw, dict) else {}
+    review_status = str(review.get("status") or "").strip()
+    acceptance.setdefault(
+        "status",
+        "accepted" if review_status == "approved" else ("not_applicable" if review_status == "not_applicable" else "pending"),
+    )
+    acceptance.setdefault("accepted_by", review.get("reviewer_identity"))
+    acceptance.setdefault("evidence_ref", review.get("evidence_ref") or review.get("surface_ref"))
+    acceptance["receipt"] = _build_acceptance_receipt(_deep_merge_dicts(normalized, {"review": review}))
+    normalized["acceptance"] = acceptance
+
     merge_raw = normalized.get("merge")
     merge: dict[str, Any] = dict(merge_raw) if isinstance(merge_raw, dict) else {}
     merge.setdefault("status", "not_applicable")
@@ -1369,6 +1557,23 @@ def _normalize_delivery_state(task: Task, state: dict[str, Any]) -> dict[str, An
     release.setdefault("target", None)
     release.setdefault("evidence_ref", None)
     normalized["release"] = release
+
+    provenance_raw = normalized.get("provenance")
+    provenance: dict[str, Any] = dict(provenance_raw) if isinstance(provenance_raw, dict) else {}
+    provenance.setdefault("status", "available")
+    provenance["packet"] = _build_provenance_packet(
+        _deep_merge_dicts(
+            normalized,
+            {"artifact": artifact, "proof": proof, "review": review, "acceptance": acceptance, "merge": merge, "release": release},
+        )
+    )
+    normalized["provenance"] = provenance
+    normalized["truth_surfaces"] = _derive_truth_surfaces(
+        _deep_merge_dicts(
+            normalized,
+            {"artifact": artifact, "proof": proof, "review": review, "acceptance": acceptance, "merge": merge, "release": release, "provenance": provenance},
+        )
+    )
 
     normalized["risk_class"] = str(normalized.get("risk_class") or "medium")
     verdict, reason = derive_delivery_verdict(normalized)
