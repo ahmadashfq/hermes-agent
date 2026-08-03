@@ -40,6 +40,7 @@ DM_CHANNEL = "6468cc16-a114-4f23-8b8c-02c1655cbf6b"
 _ENV_VARS = (
     "BUZZ_RELAY_URL",
     "BUZZ_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
     "BUZZ_CHANNELS",
     "BUZZ_HOME_CHANNEL",
     "BUZZ_ALLOWED_USERS",
@@ -157,6 +158,7 @@ class TestBuzzAdapterInit:
                 "channels": ["ccc"],
                 "poll_interval": 2,
                 "home_channel": "ccc",
+                "auth_tag": '["delegation","owner","app","sig"]',
             },
         )
         adapter = BuzzAdapter(cfg)
@@ -164,12 +166,20 @@ class TestBuzzAdapterInit:
         assert adapter.channels == ["ccc"]
         assert adapter.poll_interval == 2.0
         assert adapter.home_channel == "ccc"
+        assert adapter._auth_tag == '["delegation","owner","app","sig"]'
 
     def test_env_overrides_config(self, monkeypatch):
         monkeypatch.setenv("BUZZ_RELAY_URL", "https://env.relay")
+        monkeypatch.setenv("BUZZ_AUTH_TAG", '["delegation","env-owner","app","sig"]')
         from gateway.config import PlatformConfig
-        adapter = BuzzAdapter(PlatformConfig(enabled=True, extra={"relay_url": "https://cfg.relay"}))
+        adapter = BuzzAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={"relay_url": "https://cfg.relay", "auth_tag": '["delegation","cfg-owner","app","sig"]'},
+            )
+        )
         assert adapter.relay_url == "https://env.relay"
+        assert adapter._auth_tag == '["delegation","env-owner","app","sig"]'
 
 
 # ── CLI error contract ────────────────────────────────────────────────────
@@ -180,6 +190,66 @@ class TestCliErrorContract:
     def test_parses_json_error(self):
         msg = _cli_error_message('{"error":"relay_error","message":"boom","retryable":false}', 2)
         assert "relay_error" in msg and "boom" in msg and "exit 2" in msg
+
+
+class TestBuzzCliPlumbing:
+
+    @pytest.mark.asyncio
+    async def test_run_cli_passes_auth_tag_to_subprocess(self, monkeypatch):
+        adapter = _make_adapter({"auth_tag": '["delegation","owner","app","sig"]'})
+        captured = {}
+
+        async def fake_exec(cli_path, args, *, relay_url, private_key, auth_tag="", input_text=None, timeout=30.0):
+            captured.update(
+                cli_path=cli_path,
+                args=args,
+                relay_url=relay_url,
+                private_key=private_key,
+                auth_tag=auth_tag,
+                input_text=input_text,
+                timeout=timeout,
+            )
+            return 0, "[]", ""
+
+        monkeypatch.setattr(_buzz_mod, "_exec_buzz", fake_exec)
+        await adapter._run_cli(["users", "get"])
+        assert captured["auth_tag"] == '["delegation","owner","app","sig"]'
+
+    @pytest.mark.asyncio
+    async def test_websocket_auth_uses_configured_auth_tag(self, monkeypatch):
+        adapter = _make_adapter({"auth_tag": '["delegation","owner","app","sig"]'})
+
+        build_calls = {}
+
+        def fake_build_auth_event(*, private_key, challenge, relay_url, auth_tag_json=""):
+            build_calls.update(
+                private_key=private_key,
+                challenge=challenge,
+                relay_url=relay_url,
+                auth_tag_json=auth_tag_json,
+            )
+            return {"id": "evt-1", "kind": 22242}
+
+        monkeypatch.setattr(_buzz_mod, "_load_nostr_auth", lambda: types.SimpleNamespace(build_auth_event=fake_build_auth_event))
+
+        class _AuthSocket:
+            def __init__(self):
+                self.sent = []
+                self._recv = iter([
+                    json.dumps(["AUTH", "challenge-1"]),
+                    json.dumps(["OK", "evt-1", True, ""]),
+                ])
+
+            async def recv(self):
+                return next(self._recv)
+
+            async def send(self, payload):
+                self.sent.append(payload)
+
+        ws = _AuthSocket()
+        await adapter._authenticate_websocket(ws)
+        assert build_calls["auth_tag_json"] == '["delegation","owner","app","sig"]'
+        assert ws.sent
 
 
 # ── Seeding / high-water mark / de-dupe ───────────────────────────────────
@@ -652,8 +722,14 @@ class TestStandaloneSend:
 
         captured = {}
 
-        async def fake_exec(cli_path, args, *, relay_url, private_key, input_text=None, timeout=30.0):
-            captured.update(cli_path=cli_path, args=args, relay_url=relay_url, input_text=input_text)
+        async def fake_exec(cli_path, args, *, relay_url, private_key, auth_tag="", input_text=None, timeout=30.0):
+            captured.update(
+                cli_path=cli_path,
+                args=args,
+                relay_url=relay_url,
+                auth_tag=auth_tag,
+                input_text=input_text,
+            )
             return 0, json.dumps({"accepted": True, "event_id": "evt-cron", "message": ""}), ""
 
         monkeypatch.setattr(_buzz_mod, "_exec_buzz", fake_exec)
@@ -662,7 +738,34 @@ class TestStandaloneSend:
         assert result == {"success": True, "message_id": "evt-cron"}
         assert captured["args"][:2] == ["messages", "send"]
         assert captured["input_text"] == "cron says hi"
+        assert captured["auth_tag"] == ""
         # The private key must never be part of argv
         assert all("nsec1x" not in str(a) for a in captured["args"])
+
+    @pytest.mark.asyncio
+    async def test_standalone_send_uses_config_auth_tag(self, monkeypatch, tmp_path):
+        from gateway.config import PlatformConfig
+
+        fake_cli = tmp_path / "buzz"
+        fake_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setenv("BUZZ_RELAY_URL", "https://r")
+        monkeypatch.setenv("BUZZ_PRIVATE_KEY", "nsec1x")
+        monkeypatch.setenv("BUZZ_CLI_PATH", str(fake_cli))
+
+        captured = {}
+
+        async def fake_exec(cli_path, args, *, relay_url, private_key, auth_tag="", input_text=None, timeout=30.0):
+            captured.update(auth_tag=auth_tag, args=args, input_text=input_text)
+            return 0, json.dumps({"accepted": True, "event_id": "evt-cron", "message": ""}), ""
+
+        monkeypatch.setattr(_buzz_mod, "_exec_buzz", fake_exec)
+
+        result = await _standalone_send(
+            PlatformConfig(enabled=True, extra={"auth_tag": '["delegation","owner","app","sig"]'}),
+            CHANNEL,
+            "cron says hi",
+        )
+        assert result == {"success": True, "message_id": "evt-cron"}
+        assert captured["auth_tag"] == '["delegation","owner","app","sig"]'
 
 
