@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import sys
+import types
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -99,6 +101,33 @@ class _ScriptedCli:
         if queue:
             return queue[0]
         return 0, "[]", ""
+
+
+class _FakeWebSocket:
+    def __init__(self, *, fail_with=None, entered_event=None, hold_event=None):
+        self._fail_with = fail_with
+        self._entered_event = entered_event
+        self._hold_event = hold_event
+
+    async def __aenter__(self):
+        if self._entered_event is not None:
+            self._entered_event.set()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._fail_with is not None:
+            exc = self._fail_with
+            self._fail_with = None
+            raise exc
+        if self._hold_event is not None:
+            await self._hold_event.wait()
+        raise StopAsyncIteration
 
 
 # ── bech32 / identity helpers ─────────────────────────────────────────────
@@ -508,6 +537,41 @@ class TestBuzzAdapterLifecycle:
 
         assert await adapter.connect() is True
         assert cli.calls[-1][0] == ["users", "set-presence", "--status", "online"]
+
+    @pytest.mark.asyncio
+    async def test_websocket_reconnect_republishes_online_presence(self, monkeypatch):
+        adapter = _make_adapter({"transport": "websocket"})
+        adapter._ws_ready = asyncio.Event()
+        adapter._set_presence = AsyncMock(return_value=True)
+        adapter._authenticate_websocket = AsyncMock()
+        adapter._subscribe_websocket = AsyncMock(return_value={})
+
+        first_socket = _FakeWebSocket(fail_with=ConnectionError("socket dropped"))
+        second_entered = asyncio.Event()
+        second_hold = asyncio.Event()
+        second_socket = _FakeWebSocket(entered_event=second_entered, hold_event=second_hold)
+        sockets = iter([first_socket, second_socket])
+
+        def fake_connect(*args, **kwargs):
+            return next(sockets)
+
+        monkeypatch.setitem(sys.modules, "websockets", types.SimpleNamespace(connect=fake_connect))
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+
+        task = asyncio.create_task(adapter._websocket_loop())
+        try:
+            await asyncio.wait_for(second_entered.wait(), timeout=1)
+            for _ in range(50):
+                if adapter._set_presence.await_count == 1:
+                    break
+                await asyncio.sleep(0)
+            assert adapter._set_presence.await_count == 1
+            adapter._set_presence.assert_awaited_once_with("online")
+        finally:
+            task.cancel()
+            second_hold.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
     @pytest.mark.asyncio
     async def test_connect_fails_when_identity_lock_held(self, monkeypatch):

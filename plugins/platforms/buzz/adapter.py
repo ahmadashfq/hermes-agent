@@ -873,6 +873,7 @@ class BuzzAdapter(BasePlatformAdapter):
         import websockets
 
         backoff = 1.0
+        authenticated_once = False
         try:
             while True:
                 try:
@@ -887,8 +888,11 @@ class BuzzAdapter(BasePlatformAdapter):
                         await self._authenticate_websocket(websocket)
                         subscriptions = await self._subscribe_websocket(websocket)
                         self._ws_active = True
+                        if authenticated_once:
+                            await self._set_presence("online")
                         if self._ws_ready is not None:
                             self._ws_ready.set()
+                        authenticated_once = True
                         backoff = 1.0
                         async for raw in websocket:
                             try:
