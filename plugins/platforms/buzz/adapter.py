@@ -454,6 +454,31 @@ class BuzzAdapter(BasePlatformAdapter):
             input_text=input_text,
         )
 
+    async def _set_presence(self, status: str) -> bool:
+        """Best-effort presence publish for the current Buzz identity.
+
+        Presence mirrors the gateway connection lifecycle but must never block
+        message delivery: a presence publish failure should not keep the adapter
+        from connecting or disconnecting cleanly.
+        """
+        if not self.cli_path or not self.relay_url or not self._private_key:
+            return False
+        code, _out, err = await self._run_cli(["users", "set-presence", "--status", status])
+        if code != 0:
+            logger.warning(
+                "Buzz: failed to set presence %s for %s — %s",
+                status,
+                self._display_name or self._self_npub[:16] or self._self_pubkey[:8] or "identity",
+                _cli_error_message(err, code),
+            )
+            return False
+        logger.debug(
+            "Buzz: presence set to %s for %s",
+            status,
+            self._display_name or self._self_npub[:16] or self._self_pubkey[:8] or "identity",
+        )
+        return True
+
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -557,6 +582,7 @@ class BuzzAdapter(BasePlatformAdapter):
         if transport_used == "poll":
             self._poll_task = asyncio.create_task(self._poll_loop())
         self._mark_connected()
+        await self._set_presence("online")
         logger.info(
             "Buzz: connected to %s as %s, watching %d channel(s) via %s%s",
             self.relay_url,
@@ -570,6 +596,8 @@ class BuzzAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Stop the inbound transport and drop runtime state."""
         self._mark_disconnected()
+        if self._self_pubkey:
+            await self._set_presence("offline")
         lock_key = getattr(self, "_lock_key", None)
         if lock_key:
             try:

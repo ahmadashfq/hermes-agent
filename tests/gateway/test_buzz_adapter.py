@@ -441,9 +441,73 @@ class TestBuzzAdapterLifecycle:
         )
         adapter = _make_adapter()
         adapter._lock_key = "wss://relay.example:" + SELF_PUBKEY
+        cli = _ScriptedCli()
+        cli.script("users", "set-presence", {"ok": True})
+        adapter._run_cli = cli
         await adapter.disconnect()
         assert released == [("buzz", "wss://relay.example:" + SELF_PUBKEY)]
         assert adapter._lock_key is None
+        assert cli.calls[0][0] == ["users", "set-presence", "--status", "offline"]
+
+    @pytest.mark.asyncio
+    async def test_connect_publishes_online_presence(self, monkeypatch):
+        import gateway.status as gateway_status
+
+        monkeypatch.setattr(
+            gateway_status, "acquire_scoped_lock", lambda platform, key: True
+        )
+        adapter = _make_adapter({"transport": "websocket"})
+        adapter.cli_path = "/fake/buzz"
+        monkeypatch.setattr(_buzz_mod, "_resolve_private_key", lambda extra=None: "nsec1test")
+        monkeypatch.setattr(adapter, "_seed_channel", AsyncMock())
+        monkeypatch.setattr(adapter, "_discover_dms", AsyncMock())
+        monkeypatch.setattr(adapter, "_start_websocket", AsyncMock(return_value=True))
+        cli = _ScriptedCli()
+        cli.script(
+            "users", "get",
+            [{"pubkey": SELF_PUBKEY, "display_name": "Chip"}],
+        )
+        cli.script("channels", "list", [{"channel_id": CHANNEL, "name": "general"}])
+        cli.script("users", "set-presence", {"ok": True})
+        adapter._run_cli = cli
+
+        assert await adapter.connect() is True
+        assert [call[0] for call in cli.calls] == [
+            ["users", "get"],
+            ["channels", "list"],
+            ["users", "set-presence", "--status", "online"],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_connect_presence_failure_is_non_fatal(self, monkeypatch):
+        import gateway.status as gateway_status
+
+        monkeypatch.setattr(
+            gateway_status, "acquire_scoped_lock", lambda platform, key: True
+        )
+        adapter = _make_adapter({"transport": "websocket"})
+        adapter.cli_path = "/fake/buzz"
+        monkeypatch.setattr(_buzz_mod, "_resolve_private_key", lambda extra=None: "nsec1test")
+        monkeypatch.setattr(adapter, "_seed_channel", AsyncMock())
+        monkeypatch.setattr(adapter, "_discover_dms", AsyncMock())
+        monkeypatch.setattr(adapter, "_start_websocket", AsyncMock(return_value=True))
+        cli = _ScriptedCli()
+        cli.script(
+            "users", "get",
+            [{"pubkey": SELF_PUBKEY, "display_name": "Chip"}],
+        )
+        cli.script("channels", "list", [{"channel_id": CHANNEL, "name": "general"}])
+        cli.script(
+            "users",
+            "set-presence",
+            "",
+            code=2,
+            stderr='{"error":"relay_error","message":"presence write failed"}',
+        )
+        adapter._run_cli = cli
+
+        assert await adapter.connect() is True
+        assert cli.calls[-1][0] == ["users", "set-presence", "--status", "online"]
 
     @pytest.mark.asyncio
     async def test_connect_fails_when_identity_lock_held(self, monkeypatch):
