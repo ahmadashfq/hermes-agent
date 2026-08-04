@@ -74,18 +74,26 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     ``direct_messages_topic_id`` when the Bot API supports it.
     """
     thread_id = getattr(source, "thread_id", None)
-    metadata = {"thread_id": thread_id} if thread_id is not None else {}
+    platform = _platform_name(getattr(source, "platform", None))
+    metadata: dict[str, object] = {"thread_id": thread_id} if thread_id is not None else {}
+    if not metadata and platform == "buzz" and reply_to_message_id is not None:
+        # Native Buzz threads are reply-anchored. For a top-level channel
+        # message there is no inbound source.thread_id yet, but routing
+        # interim/status sends with the triggering event id as thread_id keeps
+        # them inside the same Buzz reply thread instead of leaking into the
+        # parent channel.
+        metadata = {"thread_id": str(reply_to_message_id)}
     # Slack workspace identity is durable routing state, not ephemeral event
     # metadata. Carry it on every outbound path (including unthreaded sends)
     # so a multi-workspace Socket Mode gateway never falls back to its primary
     # WebClient after an async, stream, or recovery boundary.
-    if _platform_name(getattr(source, "platform", None)) == "slack":
+    if platform == "slack":
         scope_id = getattr(source, "scope_id", None)
         if scope_id:
             metadata["slack_team_id"] = str(scope_id)
     if not metadata:
         return None
-    if _platform_name(getattr(source, "platform", None)) == "telegram" and getattr(source, "chat_type", None) == "dm":
+    if platform == "telegram" and getattr(source, "chat_type", None) == "dm":
         metadata["telegram_dm_topic_reply_fallback"] = True
         tid = str(thread_id)
         if tid and tid not in {"", "1"}:

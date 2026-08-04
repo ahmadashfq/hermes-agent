@@ -1520,3 +1520,32 @@ class TestSlackReplyInThreadProgressRouting:
             event_message_id="1700000000.000100",
             reply_in_thread=False,
         ) is None
+
+
+class TestBuzzThreadProgressRouting:
+    def test_buzz_progress_threads_top_level_channel_messages_by_event_id(self):
+        from gateway.run import _resolve_progress_thread_id
+
+        assert _resolve_progress_thread_id(
+            "buzz",
+            source_thread_id=None,
+            event_message_id="buzz-event-123",
+            reply_in_thread=True,
+        ) == "buzz-event-123"
+
+    def test_buzz_thread_metadata_uses_reply_anchor_when_source_has_no_thread_id(self):
+        from typing import Any, cast
+
+        from gateway.platforms.base import _thread_metadata_for_source
+        from gateway.platforms.base import SessionSource
+
+        source = SessionSource(
+            platform=cast(Any, "buzz"),
+            chat_id="chan-1",
+            chat_name="general",
+            chat_type="group",
+        )
+
+        assert _thread_metadata_for_source(source, "buzz-event-123") == {
+            "thread_id": "buzz-event-123"
+        }

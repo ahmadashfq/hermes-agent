@@ -443,6 +443,20 @@ class TestDmClassification:
         )
         assert len(adapter._dispatched) == 1
 
+    @pytest.mark.asyncio
+    async def test_channel_reply_dispatch_carries_reply_thread_anchor(self, adapter):
+        await self._poll_with(
+            adapter, CHANNEL,
+            _tagged_event(
+                "e1",
+                CHANNEL,
+                content="@chip what's up?",
+                p=SELF_PUBKEY,
+                reply_to="root-event",
+            ),
+        )
+        assert adapter._dispatched[0]["thread_id"] == "root-event"
+
 
     @pytest.mark.asyncio
     async def test_channel_like_metadata_blocks_latch_even_without_mention(self, adapter):
