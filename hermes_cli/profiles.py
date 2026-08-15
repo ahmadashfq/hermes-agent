@@ -1572,6 +1572,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     # atomic directory tombstone so a new graph cannot land mid-delete.
     from hermes_cli.profile_lifecycle import (
         assert_profile_has_no_open_assignments,
+        clear_profile_unavailable,
+        mark_profile_unavailable,
         profile_lifecycle_lock,
     )
 
@@ -1590,13 +1592,19 @@ def delete_profile(name: str, yes: bool = False) -> Path:
             _stop_gateway_process(profile_dir)
         _stop_profile_backends(canon, profile_dir)
 
-        # Make the identity unavailable atomically. A concurrent graph commit
-        # either landed before the assignment check or observes it missing.
+        # Fence the identity before the atomic directory rename. Graph writers
+        # share this lock and consult the durable fence inside their DB txn, so
+        # they either land before the assignment check or fail after deletion.
         if not profile_dir.is_dir():
             raise FileNotFoundError(f"Profile '{canon}' no longer exists.")
         if deleting_dir.exists():
             raise RuntimeError(f"profile deletion tombstone already exists: {deleting_dir}")
-        profile_dir.rename(deleting_dir)
+        mark_profile_unavailable(canon)
+        try:
+            profile_dir.rename(deleting_dir)
+        except Exception:
+            clear_profile_unavailable(canon)
+            raise
 
     # 3. Remove wrapper script
     if has_wrapper:
@@ -1653,6 +1661,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         with profile_lifecycle_lock():
             if deleting_dir.is_dir() and not profile_dir.exists():
                 deleting_dir.rename(profile_dir)
+                clear_profile_unavailable(canon)
         remove_error = e
 
     # 5. Clear active_profile if it pointed to this profile
@@ -2344,6 +2353,8 @@ def rename_profile(old_name: str, new_name: str) -> Path:
     # identity after the atomic directory rename.
     from hermes_cli.profile_lifecycle import (
         assert_profile_has_no_open_assignments,
+        clear_profile_unavailable,
+        mark_profile_unavailable,
         profile_lifecycle_lock,
     )
 
@@ -2356,7 +2367,12 @@ def rename_profile(old_name: str, new_name: str) -> Path:
         if _check_gateway_running(old_dir):
             _cleanup_gateway_service(old_canon, old_dir)
             _stop_gateway_process(old_dir)
-        old_dir.rename(new_dir)
+        mark_profile_unavailable(old_canon)
+        try:
+            old_dir.rename(new_dir)
+        except Exception:
+            clear_profile_unavailable(old_canon)
+            raise
     print(f"✓ Renamed {old_dir.name} → {new_dir.name}")
 
     # 3. Update profile-scoped Honcho host blocks, preserving aiPeer identity

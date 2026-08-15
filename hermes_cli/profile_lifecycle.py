@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import sqlite3
 import threading
@@ -36,6 +37,74 @@ def _shared_root() -> Path:
 
 def _lock_path() -> Path:
     return _shared_root() / "profiles" / ".lifecycle.lock"
+
+
+def _unavailable_path(profile_name: str) -> Path:
+    """Return a path-safe persistent fence for a retired profile identity."""
+    digest = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()
+    return (
+        _shared_root()
+        / "profiles"
+        / ".lifecycle-unavailable"
+        / f"{digest}.tombstone"
+    )
+
+
+def mark_profile_unavailable(profile_name: str) -> None:
+    """Persist a fail-closed identity fence while holding the lifecycle lock."""
+    path = _unavailable_path(profile_name)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, f"{profile_name}\n".encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def clear_profile_unavailable(profile_name: str) -> None:
+    """Remove a fence when its associated lifecycle mutation rolls back."""
+    _unavailable_path(profile_name).unlink(missing_ok=True)
+
+
+def assert_profile_assignment_available(profile_name: str) -> None:
+    """Reject assignment to a retired identity unless it has been recreated.
+
+    Never-seen assignee strings remain valid for backwards compatibility. A
+    tombstone becomes blocking only while the corresponding named profile
+    directory is absent. Callers must hold :func:`profile_lifecycle_lock` so
+    the directory and tombstone observation cannot race a delete or rename.
+    """
+    path = _unavailable_path(profile_name)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot verify lifecycle fence for profile '{profile_name}'"
+        ) from exc
+
+    # HERMES_KANBAN_HOME may relocate the shared lock/fence authority without
+    # relocating profile directories, so resolve liveness through the profile
+    # module rather than deriving a path from the Kanban root.
+    from hermes_cli.profiles import profile_exists, validate_profile_name
+
+    try:
+        validate_profile_name(profile_name)
+    except ValueError as exc:
+        raise ValueError(f"assignee profile is unavailable: {profile_name}") from exc
+    if profile_exists(profile_name):
+        return
+    raise ValueError(f"assignee profile is unavailable: {profile_name}")
 
 
 @contextlib.contextmanager

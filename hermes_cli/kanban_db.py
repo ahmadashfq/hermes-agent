@@ -3229,10 +3229,22 @@ def create_task(
     for attempt in range(2):
         task_id = _new_task_id()
         try:
+            from hermes_cli.profile_lifecycle import (
+                assert_profile_assignment_available,
+                profile_lifecycle_lock,
+            )
+
+            assignment_guard = (
+                profile_lifecycle_lock()
+                if assignee is not None
+                else contextlib.nullcontext()
+            )
             # ``allow_nested=True``: graph builders (kanban_swarm.create_swarm)
             # compose create_task calls under one outer commit so the
             # dispatcher can never observe a partially constructed graph.
-            with write_txn(conn, allow_nested=True):
+            with assignment_guard, write_txn(conn, allow_nested=True):
+                if assignee is not None:
+                    assert_profile_assignment_available(assignee)
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review or in
                 # triage for a specifier.

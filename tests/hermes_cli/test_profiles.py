@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import tarfile
+import threading
 import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -284,7 +285,79 @@ class TestDeleteProfile:
             delete_profile("coder", yes=True)
         assert profile_dir.is_dir()
 
+    def test_delete_fences_concurrent_task_creation(self, profile_env, monkeypatch):
+        """A card cannot acquire an assignee after delete's final DB check."""
+        from hermes_cli import kanban_db as kb
 
+        create_profile("coder", no_alias=True)
+        kb.init_db()
+        deletion_checked = threading.Event()
+        allow_tombstone = threading.Event()
+        writer_started = threading.Event()
+        writer_done = threading.Event()
+        delete_errors: list[BaseException] = []
+        writer_errors: list[BaseException] = []
+
+        def _pause_after_assignment_check(*_args, **_kwargs):
+            deletion_checked.set()
+            assert allow_tombstone.wait(timeout=5)
+
+        monkeypatch.setattr(
+            profiles,
+            "_cleanup_gateway_service",
+            _pause_after_assignment_check,
+        )
+
+        def _delete():
+            try:
+                delete_profile("coder", yes=True)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                delete_errors.append(exc)
+
+        def _create_assignment():
+            writer_started.set()
+            try:
+                with kb.connect_closing() as conn:
+                    kb.create_task(
+                        conn,
+                        title="must not outlive its assignee",
+                        assignee="coder",
+                    )
+            except BaseException as exc:
+                writer_errors.append(exc)
+            finally:
+                writer_done.set()
+
+        delete_thread = threading.Thread(target=_delete)
+        writer_thread = threading.Thread(target=_create_assignment)
+        delete_thread.start()
+        assert deletion_checked.wait(timeout=5)
+        writer_thread.start()
+        assert writer_started.wait(timeout=5)
+        writer_blocked = not writer_done.wait(timeout=0.2)
+        allow_tombstone.set()
+        delete_thread.join(timeout=5)
+        writer_thread.join(timeout=5)
+
+        assert writer_blocked, "create_task bypassed the profile lifecycle lock"
+        assert not delete_thread.is_alive()
+        assert not writer_thread.is_alive()
+        assert delete_errors == []
+        assert len(writer_errors) == 1
+        assert isinstance(writer_errors[0], ValueError)
+        assert "profile is unavailable" in str(writer_errors[0])
+
+        with kb.connect_closing() as conn:
+            stranded = conn.execute(
+                "SELECT id FROM tasks WHERE assignee = 'coder'"
+            ).fetchall()
+        assert stranded == []
+
+        # A live, recreated profile explicitly re-admits the retired name.
+        create_profile("coder", no_alias=True)
+        with kb.connect_closing() as conn:
+            task_id = kb.create_task(conn, title="recreated", assignee="coder")
+            assert kb.get_task(conn, task_id) is not None
 
     def test_backend_scan_only_matches_this_profile(self, profile_env, monkeypatch):
         """The backend PID scan binds by --profile selector and skips self."""
@@ -958,5 +1031,3 @@ class TestProfilesToServe:
 
         assert set(serve) == {"default", "worker"}
         assert serve["worker"] == get_profile_dir("worker")
-
-

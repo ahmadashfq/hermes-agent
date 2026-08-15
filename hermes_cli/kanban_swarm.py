@@ -22,6 +22,7 @@ import sqlite3
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.profile_lifecycle import profile_lifecycle_lock
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 
@@ -147,7 +148,10 @@ def create_swarm(
         "Swarm topology planned; root remains the shared blackboard."
     )
     activated = False
-    with kb.write_txn(conn):
+    # create_task fences profile identities before entering the board txn.
+    # Take the same re-entrant lock outside this graph-wide transaction to
+    # preserve that global lock order for every nested task creation.
+    with profile_lifecycle_lock(), kb.write_txn(conn):
         created = _create_swarm_uncommitted(
             conn,
             goal=goal,
